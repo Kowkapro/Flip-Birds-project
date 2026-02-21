@@ -1,0 +1,50 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background: #111;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  overflow: hidden;
+}
+
+/* Canvas scales to fit viewport while keeping 1280:480 aspect ratio */
+#gameCanvas {
+  display: block;
+  width: min(100vw, calc(100vh * 8 / 3));
+  height: auto;
+  cursor: pointer;
+  touch-action: none;
+}
+
+/* Portrait warning — visible only on mobile portrait */
+#portrait-warning {
+  display: none;
+}
+
+@media (orientation: portrait) and (max-width: 768px) {
+  #portrait-warning {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    position: fixed;
+    inset: 0;
+    background: #000;
+    color: #fff;
+    font-family: Arial, sans-serif;
+    font-size: 22px;
+    text-align: center;
+    justify-content: center;
+    align-items: center;
+    z-index: 100;
+  }
+
+  #portrait-warning span {
+    font-size: 56px;
+  }
+}
