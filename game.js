@@ -61,6 +61,7 @@ let canvas, ctx;
 let state;
 let bird;
 let pipes;
+let clouds;
 let score;
 let bestScore;
 let totalSpawned;
@@ -68,21 +69,97 @@ let miniscenePlayed;
 let minisceneStart;
 let lastTime;
 
+// ─── Asset variables ──────────────────────────────────────────────────────────
+
+let birdImg  = null;        // image/imageGG.png
+let girlImgs = new Array(50).fill(null);  // image/girls/1.jpg … 50.jpg
+
 // ─── Audio variables ──────────────────────────────────────────────────────────
 
-let audioCtx = null;
-let isMuted  = false;  // persists across attempts within a session
+let audioCtx  = null;
+let isMuted   = false;  // persists across attempts within a session
+let deathAudio = null;  // sounds/Звук смерти.MP3
+
+const MUSIC_TRACKS = { 1: [], 2: [] };  // 5 Audio per epoch
+let currentMusic = null;
+let currentEpoch = 0;
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 window.addEventListener('load', () => {
   canvas = document.getElementById('gameCanvas');
   ctx    = canvas.getContext('2d');
-  bestScore = 0;
+  bestScore  = 0;
+  deathAudio = new Audio('sounds/Звук смерти.MP3');
+  deathAudio.preload = 'auto';
+
+  for (let ep = 1; ep <= 2; ep++) {
+    for (let n = 1; n <= 5; n++) {
+      const a = new Audio(`music/epoch${ep}-${n}.mp3`);
+      a.preload = 'auto';
+      a.volume  = 0.28;
+      MUSIC_TRACKS[ep].push(a);
+    }
+  }
+
   setupInput();
+
+  // Loading screen while assets load
+  ctx.fillStyle = '#0d001a';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 30px Arial';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('Загрузка...', CANVAS_W / 2, CANVAS_H / 2);
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+
+  loadAssets(() => startGame());
+});
+
+function loadAssets(callback) {
+  const TOTAL = 51; // 1 bird + 50 girls
+  let loaded = 0;
+
+  function onOne() {
+    loaded++;
+    if (loaded === TOTAL) callback();
+  }
+
+  // Bird
+  const bi = new Image();
+  bi.onload  = () => { birdImg = bi; onOne(); };
+  bi.onerror = () => {               onOne(); };
+  bi.src = 'image/imageGG.png';
+
+  // Girls 1–50
+  for (let i = 1; i <= 50; i++) {
+    const gi  = new Image();
+    const idx = i - 1;
+    gi.onload  = () => { girlImgs[idx] = gi; onOne(); };
+    gi.onerror = () => {                      onOne(); };
+    gi.src = `image/girls/girls no back/${i}-removebg-preview.png`;
+  }
+}
+
+function startGame() {
+  initClouds();
   resetSession();
   requestAnimationFrame(gameLoop);
-});
+}
+
+function initClouds() {
+  clouds = [];
+  for (let i = 0; i < 8; i++) {
+    clouds.push({
+      x:     Math.random() * CANVAS_W,
+      y:     25 + Math.random() * 160,
+      r:     22 + Math.random() * 28,
+      speed: 0.38 + Math.random() * 0.42,
+    });
+  }
+}
 
 function resetSession() {
   bird            = { x: BIRD_X, y: CANVAS_H / 2 - BIRD_SIZE / 2, vy: 0 };
@@ -109,6 +186,10 @@ function ensureAudio() {
 
 function toggleMute() {
   isMuted = !isMuted;
+  if (currentMusic) {
+    if (isMuted) currentMusic.pause();
+    else currentMusic.play().catch(() => {});
+  }
 }
 
 // Helper: play a single tone with frequency ramp
@@ -140,10 +221,9 @@ function playPass() {
 }
 
 function playDeath() {
-  if (isMuted || !audioCtx) return;
-  const t = audioCtx.currentTime;
-  tone(280, 45, 'sawtooth', t,        0.28, 0.35);
-  tone(200, 30, 'square',   t + 0.05, 0.22, 0.15);
+  if (isMuted || !deathAudio) return;
+  deathAudio.currentTime = 0;
+  deathAudio.play().catch(() => {});
 }
 
 function playEpochChange() {
@@ -156,6 +236,27 @@ function playWin() {
   if (isMuted || !audioCtx) return;
   const t = audioCtx.currentTime;
   [523, 659, 784, 1047].forEach((f, i) => tone(f, f, 'sine', t + i * 0.16, 0.18, 0.22));
+}
+
+function stopMusic() {
+  if (!currentMusic) return;
+  currentMusic.onended = null;
+  currentMusic.pause();
+  currentMusic.currentTime = 0;
+  currentMusic = null;
+}
+
+function playMusic(epoch) {
+  stopMusic();
+  currentEpoch = epoch;
+  const tracks = MUSIC_TRACKS[epoch];
+  const track  = tracks[Math.floor(Math.random() * tracks.length)];
+  currentMusic = track;
+  currentMusic.currentTime = 0;
+  if (!isMuted) currentMusic.play().catch(() => {});
+  currentMusic.onended = () => {
+    if (state === S.PLAYING) playMusic(epoch);
+  };
 }
 
 // ─── Input ────────────────────────────────────────────────────────────────────
@@ -196,6 +297,7 @@ function onInput() {
   switch (state) {
     case S.START:
       state = S.PLAYING;
+      playMusic(1);
       break;
     case S.PLAYING:
       bird.vy = JUMP_VEL;
@@ -230,6 +332,19 @@ function update(dt) {
   }
   if (state !== S.PLAYING) return;
 
+  // Switch music on epoch change
+  const epoch = getEpoch();
+  if (epoch !== currentEpoch) playMusic(epoch);
+
+  // Move clouds (parallax, epoch 1 only)
+  for (const c of clouds) {
+    c.x -= c.speed * dt;
+    if (c.x + c.r * 5 < 0) {
+      c.x = CANVAS_W + c.r * 2;
+      c.y = 25 + Math.random() * 160;
+    }
+  }
+
   // Bird physics
   bird.vy += GRAVITY * dt;
   bird.y  += bird.vy  * dt;
@@ -260,6 +375,7 @@ function update(dt) {
         playEpochChange();
       } else if (score >= TOTAL_PIPES) {
         state = S.WIN;
+        stopMusic();
         playWin();
       }
     }
@@ -275,7 +391,8 @@ function spawnPipe() {
   const gapSize = getEpoch() === 1 ? GAP_EPOCH1 : GAP_EPOCH2;
   const maxGapY = CANVAS_H - GROUND_H - gapSize - GAP_MARGIN;
   const gapY    = GAP_MARGIN + Math.random() * (maxGapY - GAP_MARGIN);
-  pipes.push({ x: CANVAS_W + PIPE_WIDTH, gapY, gapSize, passed: false });
+  const imgIdx  = totalSpawned; // 0-based → maps to girlImgs[0..49] → 1.jpg..50.jpg
+  pipes.push({ x: CANVAS_W + PIPE_WIDTH, gapY, gapSize, passed: false, imgIdx });
   totalSpawned++;
 }
 
@@ -295,6 +412,7 @@ function checkCollisions() {
 
 function die() {
   state = S.DEAD;
+  stopMusic();
   playDeath();
 }
 
@@ -325,31 +443,55 @@ function render() {
 
 // ── Game world ───────────────────────────────────────────────────────────────
 
+function renderClouds() {
+  ctx.fillStyle = 'rgba(255,255,255,0.84)';
+  for (const c of clouds) {
+    ctx.beginPath();
+    ctx.arc(c.x,             c.y,            c.r,       0, Math.PI * 2);
+    ctx.arc(c.x + c.r,       c.y - c.r * 0.4, c.r * 1.1, 0, Math.PI * 2);
+    ctx.arc(c.x + c.r * 2.3, c.y,            c.r * 0.8, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
 function renderGame(theme) {
   if (getEpoch() === 2) renderStars();
+  if (getEpoch() === 1) renderClouds();
 
-  // Pipes
-  ctx.lineWidth = 3;
+  // Pipes / girls
   for (const p of pipes) {
     const bottomY = p.gapY + p.gapSize;
     const topH    = p.gapY;
     const botH    = CANVAS_H - GROUND_H - bottomY;
+    const girl    = girlImgs[p.imgIdx] ?? null;
 
-    ctx.fillStyle   = theme.pipe;
-    ctx.strokeStyle = theme.pipeBorder;
+    if (girl) {
+      // Bottom pipe: girl standing normally, feet at ground level
+      ctx.drawImage(girl, p.x, bottomY, PIPE_WIDTH, botH);
 
-    ctx.fillRect  (p.x, 0,       PIPE_WIDTH, topH);
-    ctx.strokeRect(p.x, 0,       PIPE_WIDTH, topH);
-    ctx.fillRect  (p.x, bottomY, PIPE_WIDTH, botH);
-    ctx.strokeRect(p.x, bottomY, PIPE_WIDTH, botH);
+      // Top pipe: same girl flipped vertically, feet at ceiling (gap edge)
+      ctx.save();
+      ctx.translate(p.x, p.gapY); // origin = bottom edge of top pipe
+      ctx.scale(1, -1);            // flip Y so feet point up toward ceiling
+      ctx.drawImage(girl, 0, 0, PIPE_WIDTH, topH);
+      ctx.restore();
 
-    // Caps at gap edge
-    const capW = PIPE_WIDTH + 10;
-    const capH = 14;
-    ctx.fillRect  (p.x - 5, topH - capH, capW, capH);
-    ctx.strokeRect(p.x - 5, topH - capH, capW, capH);
-    ctx.fillRect  (p.x - 5, bottomY,     capW, capH);
-    ctx.strokeRect(p.x - 5, bottomY,     capW, capH);
+    } else {
+      // Fallback: colored rectangles + caps
+      ctx.lineWidth   = 3;
+      ctx.fillStyle   = theme.pipe;
+      ctx.strokeStyle = theme.pipeBorder;
+      ctx.fillRect  (p.x, 0,       PIPE_WIDTH, topH);
+      ctx.strokeRect(p.x, 0,       PIPE_WIDTH, topH);
+      ctx.fillRect  (p.x, bottomY, PIPE_WIDTH, botH);
+      ctx.strokeRect(p.x, bottomY, PIPE_WIDTH, botH);
+
+      const capW = PIPE_WIDTH + 10, capH = 14;
+      ctx.fillRect  (p.x - 5, topH - capH, capW, capH);
+      ctx.strokeRect(p.x - 5, topH - capH, capW, capH);
+      ctx.fillRect  (p.x - 5, bottomY,     capW, capH);
+      ctx.strokeRect(p.x - 5, bottomY,     capW, capH);
+    }
   }
 
   // Ground
@@ -358,30 +500,21 @@ function renderGame(theme) {
   ctx.fillStyle = theme.groundTop;
   ctx.fillRect(0, CANVAS_H - GROUND_H, CANVAS_W, 8);
 
-  // Bird body
-  ctx.fillStyle   = '#FFD700';
-  ctx.strokeStyle = '#B8860B';
-  ctx.lineWidth   = 2;
-  ctx.fillRect  (bird.x, bird.y, BIRD_SIZE, BIRD_SIZE);
-  ctx.strokeRect(bird.x, bird.y, BIRD_SIZE, BIRD_SIZE);
+  // Bird — image sprite (drawn slightly larger than hitbox, centered on it)
+  const drawSize = 60;
+  const drawX    = bird.x + BIRD_SIZE / 2 - drawSize / 2;
+  const drawY    = bird.y + BIRD_SIZE / 2 - drawSize / 2;
 
-  // Beak
-  ctx.fillStyle = '#FF8C00';
-  ctx.beginPath();
-  ctx.moveTo(bird.x + BIRD_SIZE,     bird.y + BIRD_SIZE * 0.4);
-  ctx.lineTo(bird.x + BIRD_SIZE + 8, bird.y + BIRD_SIZE * 0.5);
-  ctx.lineTo(bird.x + BIRD_SIZE,     bird.y + BIRD_SIZE * 0.6);
-  ctx.fill();
-
-  // Eye
-  ctx.fillStyle = '#111';
-  ctx.beginPath();
-  ctx.arc(bird.x + BIRD_SIZE - 9, bird.y + 12, 4, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#fff';
-  ctx.beginPath();
-  ctx.arc(bird.x + BIRD_SIZE - 8, bird.y + 11, 1.5, 0, Math.PI * 2);
-  ctx.fill();
+  if (birdImg) {
+    ctx.drawImage(birdImg, drawX, drawY, drawSize, drawSize);
+  } else {
+    // Fallback: yellow square if image failed to load
+    ctx.fillStyle   = '#FFD700';
+    ctx.strokeStyle = '#B8860B';
+    ctx.lineWidth   = 2;
+    ctx.fillRect  (bird.x, bird.y, BIRD_SIZE, BIRD_SIZE);
+    ctx.strokeRect(bird.x, bird.y, BIRD_SIZE, BIRD_SIZE);
+  }
 
   // HUD — score (shifted right to make room for mute button)
   ctx.textAlign    = 'left';
@@ -492,6 +625,8 @@ function renderStart(theme) {
   ctx.fillStyle = theme.groundTop;
   ctx.fillRect(0, CANVAS_H - GROUND_H, CANVAS_W, 8);
 
+  renderClouds();
+
   ctx.fillStyle = 'rgba(0,0,0,0.55)';
   ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
 
@@ -564,7 +699,7 @@ function renderDead() {
 
   ctx.fillStyle = '#ff4444';
   ctx.font      = 'bold 58px Arial';
-  ctx.fillText('ВРЕЗАЛСЯ!', CANVAS_W / 2, CANVAS_H / 2 - 70);
+  ctx.fillText('Это РПУ', CANVAS_W / 2, CANVAS_H / 2 - 70);
 
   ctx.fillStyle = '#ffffff';
   ctx.font      = '32px Arial';
