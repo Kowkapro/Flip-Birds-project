@@ -24,6 +24,7 @@ const GAP_MARGIN    = 50;
 const TOTAL_PIPES   = 50;
 const EPOCH_CHANGE  = 30;
 const MINISCENE_MS  = 3000;
+const COUNTDOWN_MS  = 3000;
 
 // Mute button: circle in top-left corner
 const MUTE_BTN = { x: 10, y: 10, r: 20 }; // center at (30, 30)
@@ -53,7 +54,7 @@ const THEME = {
 
 // ─── Game state machine ───────────────────────────────────────────────────────
 
-const S = { START: 0, PLAYING: 1, MINISCENE: 2, DEAD: 3, WIN: 4 };
+const S = { START: 0, PLAYING: 1, MINISCENE: 2, DEAD: 3, WIN: 4, INTRO: 5, WIN_VIDEO: 6, COUNTDOWN: 7 };
 
 // ─── Game variables ───────────────────────────────────────────────────────────
 
@@ -67,6 +68,7 @@ let bestScore;
 let totalSpawned;
 let miniscenePlayed;
 let minisceneStart;
+let countdownStart;
 let lastTime;
 
 // ─── Asset variables ──────────────────────────────────────────────────────────
@@ -76,9 +78,14 @@ let girlImgs = new Array(50).fill(null);  // image/girls/1.jpg … 50.jpg
 
 // ─── Audio variables ──────────────────────────────────────────────────────────
 
-let audioCtx  = null;
-let isMuted   = false;  // persists across attempts within a session
-let deathAudio = null;  // sounds/Звук смерти.MP3
+let audioCtx   = null;
+let isMuted    = false;  // persists across attempts within a session
+let deathAudio = null;   // sounds/Звук смерти.MP3
+
+let videoEl       = null;
+let skipBtn       = null;
+let playIntroNext = true; // intro plays on first start and after WIN
+let sofikoVideo   = null; // animated character at pipe 50
 
 const MUSIC_TRACKS = { 1: [], 2: [] };  // 5 Audio per epoch
 let currentMusic = null;
@@ -93,8 +100,21 @@ window.addEventListener('load', () => {
   deathAudio = new Audio('sounds/Звук смерти.MP3');
   deathAudio.preload = 'auto';
 
+  videoEl = document.getElementById('gameVideo');
+  skipBtn  = document.getElementById('skipBtn');
+  videoEl.addEventListener('ended', onVideoEnd);
+  skipBtn.addEventListener('click',  onVideoEnd);
+
+  sofikoVideo = document.createElement('video');
+  sofikoVideo.src      = 'video/hops/Privit Sofiko.mp4';
+  sofikoVideo.loop     = true;
+  sofikoVideo.muted    = isMuted;
+  sofikoVideo.playsInline = true;
+  sofikoVideo.preload  = 'auto';
+
+  const trackCount = { 1: 5, 2: 10 };
   for (let ep = 1; ep <= 2; ep++) {
-    for (let n = 1; n <= 5; n++) {
+    for (let n = 1; n <= trackCount[ep]; n++) {
       const a = new Audio(`music/epoch${ep}-${n}.mp3`);
       a.preload = 'auto';
       a.volume  = 0.28;
@@ -169,6 +189,7 @@ function resetSession() {
   miniscenePlayed = false;
   lastTime        = null;
   state           = S.START;
+  if (sofikoVideo) { sofikoVideo.pause(); sofikoVideo.currentTime = 0; }
   // isMuted is intentionally NOT reset — persists between attempts
 }
 
@@ -190,6 +211,8 @@ function toggleMute() {
     if (isMuted) currentMusic.pause();
     else currentMusic.play().catch(() => {});
   }
+  if (videoEl)     videoEl.muted     = isMuted;
+  if (sofikoVideo) sofikoVideo.muted = isMuted;
 }
 
 // Helper: play a single tone with frequency ramp
@@ -259,6 +282,33 @@ function playMusic(epoch) {
   };
 }
 
+function playVideo(src) {
+  stopMusic();
+  videoEl.src   = src;
+  videoEl.muted = isMuted;
+  videoEl.style.display = 'block';
+  skipBtn.style.display  = 'block';
+  videoEl.play().catch(() => {});
+}
+
+function onVideoEnd() {
+  videoEl.pause();
+  videoEl.src           = '';
+  videoEl.style.display = 'none';
+  skipBtn.style.display  = 'none';
+
+  if (state === S.INTRO) {
+    state = S.COUNTDOWN;
+    countdownStart = Date.now();
+    playMusic(1);
+  } else if (state === S.MINISCENE) {
+    state = S.PLAYING;
+    playMusic(2);
+  } else if (state === S.WIN_VIDEO) {
+    state = S.WIN;
+  }
+}
+
 // ─── Input ────────────────────────────────────────────────────────────────────
 
 function getCanvasCoords(e) {
@@ -296,15 +346,24 @@ function setupInput() {
 function onInput() {
   switch (state) {
     case S.START:
-      state = S.PLAYING;
-      playMusic(1);
+      if (playIntroNext) {
+        playIntroNext = false;
+        state = S.INTRO;
+        playVideo('video/1.mp4');
+      } else {
+        state = S.PLAYING;
+        playMusic(1);
+      }
       break;
     case S.PLAYING:
       bird.vy = JUMP_VEL;
       playJump();
       break;
     case S.DEAD:
+      resetSession();
+      break;
     case S.WIN:
+      playIntroNext = true;
       resetSession();
       break;
     case S.MINISCENE:
@@ -326,8 +385,10 @@ function gameLoop(ts) {
 // ─── Update ───────────────────────────────────────────────────────────────────
 
 function update(dt) {
-  if (state === S.MINISCENE) {
-    if (Date.now() - minisceneStart >= MINISCENE_MS) state = S.PLAYING;
+  if (state === S.INTRO || state === S.WIN_VIDEO) return;
+  if (state === S.MINISCENE) return; // wait for video to end
+  if (state === S.COUNTDOWN) {
+    if (Date.now() - countdownStart >= COUNTDOWN_MS) state = S.PLAYING;
     return;
   }
   if (state !== S.PLAYING) return;
@@ -335,6 +396,14 @@ function update(dt) {
   // Switch music on epoch change
   const epoch = getEpoch();
   if (epoch !== currentEpoch) playMusic(epoch);
+
+  // Manage Sofiko video: play when pipe 50 is on screen
+  const sofikoPipe = pipes.find(p => p.imgIdx === 49);
+  if (sofikoPipe && sofikoPipe.x < CANVAS_W && sofikoVideo.readyState >= 2) {
+    if (sofikoVideo.paused) { sofikoVideo.muted = isMuted; sofikoVideo.play().catch(() => {}); }
+  } else if (!sofikoPipe || sofikoPipe.x >= CANVAS_W) {
+    if (!sofikoVideo.paused) sofikoVideo.pause();
+  }
 
   // Move clouds (parallax, epoch 1 only)
   for (const c of clouds) {
@@ -370,13 +439,14 @@ function update(dt) {
 
       if (score === EPOCH_CHANGE && !miniscenePlayed) {
         miniscenePlayed = true;
-        minisceneStart  = Date.now();
         state           = S.MINISCENE;
-        playEpochChange();
+        playVideo('video/2.mp4');
       } else if (score >= TOTAL_PIPES) {
-        state = S.WIN;
+        state = S.WIN_VIDEO;
         stopMusic();
+        if (sofikoVideo) sofikoVideo.pause();
         playWin();
+        playVideo('video/3.mp4');
       }
     }
   }
@@ -413,6 +483,7 @@ function checkCollisions() {
 function die() {
   state = S.DEAD;
   stopMusic();
+  if (sofikoVideo) sofikoVideo.pause();
   playDeath();
 }
 
@@ -429,12 +500,16 @@ function render() {
   ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
 
   switch (state) {
-    case S.START: renderStart(theme); break;
-    case S.WIN:   renderWin();        break;
+    case S.START:    renderStart(theme); break;
+    case S.WIN:      renderWin();        break;
+    case S.INTRO:
+    case S.WIN_VIDEO:
+      break; // video element covers canvas
     default:
       renderGame(theme);
       if (state === S.MINISCENE) renderMiniscene();
       if (state === S.DEAD)      renderDead();
+      if (state === S.COUNTDOWN) renderCountdown();
       break;
   }
 
@@ -465,14 +540,28 @@ function renderGame(theme) {
     const botH    = CANVAS_H - GROUND_H - bottomY;
     const girl    = girlImgs[p.imgIdx] ?? null;
 
-    if (girl) {
+    if (p.imgIdx === 49 && sofikoVideo && sofikoVideo.readyState >= 2) {
+      // Pipe 50 — animated Sofiko video character (screen blend removes black bg)
+      ctx.save();
+      ctx.globalCompositeOperation = 'screen';
+      ctx.drawImage(sofikoVideo, p.x, bottomY, PIPE_WIDTH, botH);
+      ctx.restore();
+
+      ctx.save();
+      ctx.globalCompositeOperation = 'screen';
+      ctx.translate(p.x, p.gapY);
+      ctx.scale(1, -1);
+      ctx.drawImage(sofikoVideo, 0, 0, PIPE_WIDTH, topH);
+      ctx.restore();
+
+    } else if (girl) {
       // Bottom pipe: girl standing normally, feet at ground level
       ctx.drawImage(girl, p.x, bottomY, PIPE_WIDTH, botH);
 
       // Top pipe: same girl flipped vertically, feet at ceiling (gap edge)
       ctx.save();
-      ctx.translate(p.x, p.gapY); // origin = bottom edge of top pipe
-      ctx.scale(1, -1);            // flip Y so feet point up toward ceiling
+      ctx.translate(p.x, p.gapY);
+      ctx.scale(1, -1);
       ctx.drawImage(girl, 0, 0, PIPE_WIDTH, topH);
       ctx.restore();
 
@@ -685,6 +774,33 @@ function renderMiniscene() {
   ctx.fillRect(bx, by, bw, 6);
   ctx.fillStyle = '#ffccff';
   ctx.fillRect(bx, by, bw * progress, 6);
+
+  ctx.textAlign    = 'left';
+  ctx.textBaseline = 'alphabetic';
+}
+
+function renderCountdown() {
+  const progress = Math.min((Date.now() - countdownStart) / COUNTDOWN_MS, 1);
+  const bw = 420, bh = 7;
+  const bx = CANVAS_W / 2 - bw / 2;
+  const by = CANVAS_H / 2 + 30;
+
+  ctx.fillStyle = 'rgba(0,0,0,0.52)';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffffff';
+  ctx.font      = 'bold 50px Arial';
+  ctx.fillText('Приготовься', CANVAS_W / 2, CANVAS_H / 2 - 16);
+
+  // Track (background)
+  ctx.fillStyle = 'rgba(255,255,255,0.18)';
+  ctx.fillRect(bx, by, bw, bh);
+
+  // Blue fill
+  ctx.fillStyle = '#4fc3f7';
+  ctx.fillRect(bx, by, bw * progress, bh);
 
   ctx.textAlign    = 'left';
   ctx.textBaseline = 'alphabetic';
