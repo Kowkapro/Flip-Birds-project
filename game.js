@@ -23,8 +23,11 @@ const GAP_MARGIN    = 50;
 
 const TOTAL_PIPES   = 50;
 const EPOCH_CHANGE  = 30;
-const MINISCENE_MS  = 3000;
+const MINISCENE_MS  = 5000; // text pause after pipe-30 video
 const COUNTDOWN_MS  = 3000;
+
+const STORY_CHARS_PER_SEC = 35;
+const STORY_TEXT = 'Это история о парне, который прошёл долгий путь: получил звание юриста, отдал долг Родине, преодолел немало испытаний и добился успеха. Теперь, когда жизнь наконец-то вошла в ритм, перед ним стоит новое, самое трудное испытание — найти ту самую. Но, как всегда, всё оказывается не так просто...';
 
 // Mute button: circle in top-left corner
 const MUTE_BTN = { x: 10, y: 10, r: 20 }; // center at (30, 30)
@@ -54,7 +57,7 @@ const THEME = {
 
 // ─── Game state machine ───────────────────────────────────────────────────────
 
-const S = { START: 0, PLAYING: 1, MINISCENE: 2, DEAD: 3, WIN: 4, INTRO: 5, WIN_VIDEO: 6, COUNTDOWN: 7 };
+const S = { START: 0, PLAYING: 1, MINISCENE: 2, DEAD: 3, WIN: 4, INTRO: 5, WIN_VIDEO: 6, COUNTDOWN: 7, MINISCENE_TEXT: 8, STORY: 9 };
 
 // ─── Game variables ───────────────────────────────────────────────────────────
 
@@ -69,11 +72,20 @@ let totalSpawned;
 let miniscenePlayed;
 let minisceneStart;
 let countdownStart;
+let nearMissFlash;
 let lastTime;
+
+let storyLines      = null;
+let storyFullText   = '';
+let storyChars      = 0;
+let storyStart      = 0;
+let storyTypingDone = false;
+let storyStars      = [];
 
 // ─── Asset variables ──────────────────────────────────────────────────────────
 
 let birdImg  = null;        // image/imageGG.png
+let dieImg   = null;        // image/die.png
 let girlImgs = new Array(50).fill(null);  // image/girls/1.jpg … 50.jpg
 
 // ─── Audio variables ──────────────────────────────────────────────────────────
@@ -128,18 +140,21 @@ window.addEventListener('load', () => {
   ctx.fillStyle = '#0d001a';
   ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
   ctx.fillStyle = '#ffffff';
-  ctx.font = 'bold 30px Arial';
+  ctx.font = 'bold 30px "BelweC AG"';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText('Загрузка...', CANVAS_W / 2, CANVAS_H / 2);
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
 
-  loadAssets(() => startGame());
+  // Wait for Obelix Pro to load before starting (ensures correct canvas text rendering)
+  document.fonts.load('bold 30px "BelweC AG"').catch(() => {}).then(() => {
+    loadAssets(() => startGame());
+  });
 });
 
 function loadAssets(callback) {
-  const TOTAL = 51; // 1 bird + 50 girls
+  const TOTAL = 52; // 1 bird + 1 die + 50 girls
   let loaded = 0;
 
   function onOne() {
@@ -152,6 +167,12 @@ function loadAssets(callback) {
   bi.onload  = () => { birdImg = bi; onOne(); };
   bi.onerror = () => {               onOne(); };
   bi.src = 'image/imageGG.png';
+
+  // Die image
+  const di = new Image();
+  di.onload  = () => { dieImg = di; onOne(); };
+  di.onerror = () => {               onOne(); };
+  di.src = 'image/die.png';
 
   // Girls 1–50
   for (let i = 1; i <= 50; i++) {
@@ -182,15 +203,38 @@ function initClouds() {
 }
 
 function resetSession() {
-  bird            = { x: BIRD_X, y: CANVAS_H / 2 - BIRD_SIZE / 2, vy: 0 };
+  bird            = { x: BIRD_X, y: CANVAS_H / 2 - BIRD_SIZE / 2, vy: 0, angle: 0, jumpStretch: 0 };
   pipes           = [];
   score           = 0;
   totalSpawned    = 0;
+  nearMissFlash   = 0;
   miniscenePlayed = false;
   lastTime        = null;
   state           = S.START;
   if (sofikoVideo) { sofikoVideo.pause(); sofikoVideo.currentTime = 0; }
   // isMuted is intentionally NOT reset — persists between attempts
+}
+
+function initStoryStars() {
+  storyStars = [];
+  for (let i = 0; i < 200; i++) {
+    storyStars.push({
+      x:     Math.random() * CANVAS_W,
+      y:     Math.random() * CANVAS_H,
+      r:     Math.random() * 1.5 + 0.4,
+      phase: Math.random() * Math.PI * 2,
+    });
+  }
+}
+
+function initStory() {
+  storyChars      = 0;
+  storyTypingDone = false;
+  storyStart      = Date.now();
+  storyLines      = null; // recomputed in renderStory
+  storyFullText   = '';
+  skipBtn.style.display = 'none';
+  if (storyStars.length === 0) initStoryStars();
 }
 
 // ─── Audio ────────────────────────────────────────────────────────────────────
@@ -292,6 +336,14 @@ function playVideo(src) {
 }
 
 function onVideoEnd() {
+  // Story screen skip (skip button also routes here via click listener)
+  if (state === S.STORY) {
+    skipBtn.style.display = 'none';
+    state = S.INTRO;
+    playVideo('video/1.mp4');
+    return;
+  }
+
   videoEl.pause();
   videoEl.src           = '';
   videoEl.style.display = 'none';
@@ -302,7 +354,9 @@ function onVideoEnd() {
     countdownStart = Date.now();
     playMusic(1);
   } else if (state === S.MINISCENE) {
-    state = S.PLAYING;
+    // Video done — show text screen for 5 s before resuming play
+    minisceneStart = Date.now();
+    state = S.MINISCENE_TEXT;
     playMusic(2);
   } else if (state === S.WIN_VIDEO) {
     state = S.WIN;
@@ -348,15 +402,23 @@ function onInput() {
     case S.START:
       if (playIntroNext) {
         playIntroNext = false;
-        state = S.INTRO;
-        playVideo('video/1.mp4');
+        state = S.STORY;
+        initStory();
       } else {
         state = S.PLAYING;
         playMusic(1);
       }
       break;
+    case S.STORY:
+      if (storyTypingDone) {
+        skipBtn.style.display = 'none';
+        state = S.INTRO;
+        playVideo('video/1.mp4');
+      }
+      break;
     case S.PLAYING:
       bird.vy = JUMP_VEL;
+      bird.jumpStretch = 1;
       playJump();
       break;
     case S.DEAD:
@@ -386,9 +448,21 @@ function gameLoop(ts) {
 
 function update(dt) {
   if (state === S.INTRO || state === S.WIN_VIDEO) return;
+  if (state === S.STORY) return;
   if (state === S.MINISCENE) return; // wait for video to end
+  if (state === S.MINISCENE_TEXT) {
+    if (Date.now() - minisceneStart >= MINISCENE_MS) state = S.PLAYING;
+    return;
+  }
   if (state === S.COUNTDOWN) {
     if (Date.now() - countdownStart >= COUNTDOWN_MS) state = S.PLAYING;
+    return;
+  }
+  if (state === S.DEAD) {
+    // Continue bird physics for death spin animation
+    bird.vy    += GRAVITY * dt;
+    bird.y     += bird.vy  * dt;
+    bird.angle += 0.12 * dt;
     return;
   }
   if (state !== S.PLAYING) return;
@@ -415,8 +489,10 @@ function update(dt) {
   }
 
   // Bird physics
-  bird.vy += GRAVITY * dt;
-  bird.y  += bird.vy  * dt;
+  bird.vy          += GRAVITY * dt;
+  bird.y           += bird.vy  * dt;
+  bird.jumpStretch  = Math.max(0, bird.jumpStretch - 0.07 * dt);
+  nearMissFlash     = Math.max(0, nearMissFlash - 0.04 * dt);
 
   // Spawn pipes
   if (totalSpawned < TOTAL_PIPES) {
@@ -428,7 +504,7 @@ function update(dt) {
 
   // Move pipes & detect passing
   for (const p of pipes) {
-    p.x -= PIPE_SPEED * dt;
+    p.x -= getPipeSpeed() * dt;
 
     if (!p.passed && p.x + PIPE_WIDTH < bird.x) {
       p.passed = true;
@@ -436,6 +512,13 @@ function update(dt) {
       if (score > bestScore) bestScore = score;
 
       playPass();
+
+      // Near-miss: glow if bird barely cleared the gap
+      const by1 = bird.y + HIT_INSET;
+      const by2 = bird.y + BIRD_SIZE - HIT_INSET;
+      if (Math.min(by1 - p.gapY, (p.gapY + p.gapSize) - by2) < 25) {
+        nearMissFlash = 1;
+      }
 
       if (score === EPOCH_CHANGE && !miniscenePlayed) {
         miniscenePlayed = true;
@@ -481,6 +564,7 @@ function checkCollisions() {
 }
 
 function die() {
+  bird.angle = Math.max(-0.4, Math.min(0.4, bird.vy * 0.035));
   state = S.DEAD;
   stopMusic();
   if (sofikoVideo) sofikoVideo.pause();
@@ -489,8 +573,9 @@ function die() {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function getEpoch() { return score >= EPOCH_CHANGE ? 2 : 1; }
-function getTheme() { return THEME[getEpoch()]; }
+function getEpoch()     { return score >= EPOCH_CHANGE ? 2 : 1; }
+function getTheme()     { return THEME[getEpoch()]; }
+function getPipeSpeed() { return PIPE_SPEED + score * 0.01; }
 
 // ─── Render ───────────────────────────────────────────────────────────────────
 
@@ -501,19 +586,65 @@ function render() {
 
   switch (state) {
     case S.START:    renderStart(theme); break;
+    case S.STORY:    renderStory();      break;
     case S.WIN:      renderWin();        break;
     case S.INTRO:
     case S.WIN_VIDEO:
       break; // video element covers canvas
     default:
       renderGame(theme);
-      if (state === S.MINISCENE) renderMiniscene();
+      if (state === S.MINISCENE || state === S.MINISCENE_TEXT) renderMiniscene();
       if (state === S.DEAD)      renderDead();
       if (state === S.COUNTDOWN) renderCountdown();
       break;
   }
 
   renderMuteBtn(); // always on top of everything
+}
+
+// ── Bird sprite ──────────────────────────────────────────────────────────────
+
+function renderBirdSprite() {
+  const drawSize = 60;
+  const cx = bird.x + BIRD_SIZE / 2;
+  const cy = bird.y + BIRD_SIZE / 2;
+
+  // Alive: gentle pitch tilt by velocity; Dead: accumulated spin
+  const angle = (state === S.DEAD)
+    ? bird.angle
+    : Math.max(-0.4, Math.min(0.4, bird.vy * 0.035));
+
+  // Squash/stretch only while alive
+  const sx = (state !== S.DEAD) ? (1 - 0.15 * bird.jumpStretch) : 1;
+  const sy = (state !== S.DEAD) ? (1 + 0.25 * bird.jumpStretch) : 1;
+
+  const img = (state === S.DEAD && dieImg) ? dieImg : birdImg;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(angle);
+  ctx.scale(sx, sy);
+  if (img) {
+    ctx.drawImage(img, -drawSize / 2, -drawSize / 2, drawSize, drawSize);
+  } else {
+    ctx.fillStyle   = '#FFD700';
+    ctx.strokeStyle = '#B8860B';
+    ctx.lineWidth   = 2;
+    ctx.fillRect  (-BIRD_SIZE / 2, -BIRD_SIZE / 2, BIRD_SIZE, BIRD_SIZE);
+    ctx.strokeRect(-BIRD_SIZE / 2, -BIRD_SIZE / 2, BIRD_SIZE, BIRD_SIZE);
+  }
+  ctx.restore();
+
+  // Near-miss glow
+  if (nearMissFlash > 0) {
+    ctx.save();
+    ctx.globalAlpha = nearMissFlash * 0.55;
+    ctx.fillStyle   = '#ffffa0';
+    ctx.beginPath();
+    ctx.arc(cx, cy, drawSize * 0.6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
 }
 
 // ── Game world ───────────────────────────────────────────────────────────────
@@ -589,20 +720,9 @@ function renderGame(theme) {
   ctx.fillStyle = theme.groundTop;
   ctx.fillRect(0, CANVAS_H - GROUND_H, CANVAS_W, 8);
 
-  // Bird — image sprite (drawn slightly larger than hitbox, centered on it)
-  const drawSize = 60;
-  const drawX    = bird.x + BIRD_SIZE / 2 - drawSize / 2;
-  const drawY    = bird.y + BIRD_SIZE / 2 - drawSize / 2;
-
-  if (birdImg) {
-    ctx.drawImage(birdImg, drawX, drawY, drawSize, drawSize);
-  } else {
-    // Fallback: yellow square if image failed to load
-    ctx.fillStyle   = '#FFD700';
-    ctx.strokeStyle = '#B8860B';
-    ctx.lineWidth   = 2;
-    ctx.fillRect  (bird.x, bird.y, BIRD_SIZE, BIRD_SIZE);
-    ctx.strokeRect(bird.x, bird.y, BIRD_SIZE, BIRD_SIZE);
+  // Bird — skipped when dead (renderDead draws it on top of the overlay)
+  if (state !== S.DEAD) {
+    renderBirdSprite();
   }
 
   // HUD — score (shifted right to make room for mute button)
@@ -612,11 +732,11 @@ function renderGame(theme) {
   ctx.fillRect(56, 12, 200, bestScore > 0 ? 58 : 36);
 
   ctx.fillStyle = theme.hudColor;
-  ctx.font      = 'bold 24px Arial';
+  ctx.font      = 'bold 24px "BelweC AG"';
   ctx.fillText(`Труба: ${score} / ${TOTAL_PIPES}`, 64, 16);
 
   if (bestScore > 0) {
-    ctx.font = '16px Arial';
+    ctx.font = '16px "BelweC AG"';
     ctx.fillText(`Рекорд: ${bestScore}`, 64, 46);
   }
 
@@ -624,7 +744,7 @@ function renderGame(theme) {
   ctx.textAlign    = 'right';
   ctx.textBaseline = 'top';
   ctx.fillStyle    = theme.epochLabel;
-  ctx.font         = 'bold 16px Arial';
+  ctx.font         = 'bold 16px "BelweC AG"';
   ctx.fillText(`Эпоха ${getEpoch()}`, CANVAS_W - 16, 14);
   ctx.textAlign    = 'left';
 }
@@ -719,29 +839,83 @@ function renderStart(theme) {
   ctx.fillStyle = 'rgba(0,0,0,0.55)';
   ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
 
+  const cx = CANVAS_W / 2;
+  const cy = CANVAS_H / 2;
+
+  // Helper: draw ════ ◆ ════ separator
+  function drawSep(y, armW) {
+    const gap = 16;
+    ctx.strokeStyle = 'rgba(201,162,39,0.75)';
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath(); ctx.moveTo(cx - gap - armW, y); ctx.lineTo(cx - gap, y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx + gap, y);         ctx.lineTo(cx + gap + armW, y); ctx.stroke();
+    ctx.fillStyle = '#c9a227';
+    ctx.save(); ctx.translate(cx, y); ctx.rotate(Math.PI / 4); ctx.fillRect(-5, -5, 10, 10); ctx.restore();
+  }
+
   ctx.textAlign    = 'center';
   ctx.textBaseline = 'middle';
 
-  ctx.fillStyle = '#FFD700';
-  ctx.font      = 'bold 76px Arial';
-  ctx.fillText('FLIP-BIRDS', CANVAS_W / 2, CANVAS_H / 2 - 80);
+  // ── Top separator ────────────────────────────────────────
+  drawSep(cy - 110, 200);
 
+  // ── Title "FLIP BOYS" (two-color glow) ───────────────────
+  ctx.font = 'bold 84px "BelweC AG"';
+  ctx.textAlign = 'left';
+
+  const part1  = 'Flip ';
+  const part2  = 'Boy';
+  const totalW = ctx.measureText(part1 + part2).width;
+  const p1w    = ctx.measureText(part1).width;
+  const titleX = cx - totalW / 2;
+  const titleY = cy - 68;
+
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
+
+  ctx.shadowColor = '#FFD700';
+  ctx.shadowBlur  = 28;
+  ctx.fillStyle   = '#FFD700';
+  ctx.fillText(part1, titleX, titleY);
+
+  ctx.shadowColor = '#ff70c4';
+  ctx.shadowBlur  = 28;
+  ctx.fillStyle   = '#ff70c4';
+  ctx.fillText(part2, titleX + p1w, titleY);
+
+  ctx.shadowBlur  = 0;
+  ctx.shadowColor = 'transparent';
+
+  // ── Separator below title ────────────────────────────────
+  drawSep(cy - 28, 150);
+
+  // ── Subtitle ─────────────────────────────────────────────
+  ctx.textAlign = 'center';
   ctx.fillStyle = '#ffccaa';
-  ctx.font      = '22px Arial';
-  ctx.fillText('История мальчика-птицы в поисках любви', CANVAS_W / 2, CANVAS_H / 2 - 30);
+  ctx.font      = '22px "BelweC AG"';
+  ctx.fillText('История мальчика-птицы в поисках любви', cx, cy - 6);
 
+  // ── Thin divider before instructions ─────────────────────
+  ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+  ctx.lineWidth   = 1;
+  ctx.beginPath();
+  ctx.moveTo(cx - 260, cy + 18);
+  ctx.lineTo(cx + 260, cy + 18);
+  ctx.stroke();
+
+  // ── Instructions ─────────────────────────────────────────
   ctx.fillStyle = '#ffffff';
-  ctx.font      = 'bold 28px Arial';
-  ctx.fillText('Нажми Space, кликни или тапни чтобы начать', CANVAS_W / 2, CANVAS_H / 2 + 30);
+  ctx.font      = 'bold 28px "BelweC AG"';
+  ctx.fillText('Нажми Space, кликни или тапни чтобы начать', cx, cy + 42);
 
   ctx.fillStyle = '#aaaaaa';
-  ctx.font      = '18px Arial';
-  ctx.fillText('Space / Клик / Тап — взлёт', CANVAS_W / 2, CANVAS_H / 2 + 68);
+  ctx.font      = '18px "BelweC AG"';
+  ctx.fillText('Space / Клик / Тап — взлёт', cx, cy + 78);
 
   if (bestScore > 0) {
     ctx.fillStyle = '#FFD700';
-    ctx.font      = 'bold 20px Arial';
-    ctx.fillText(`Рекорд сессии: ${bestScore}`, CANVAS_W / 2, CANVAS_H / 2 + 110);
+    ctx.font      = 'bold 20px "BelweC AG"';
+    ctx.fillText(`Рекорд сессии: ${bestScore}`, cx, cy + 114);
   }
 
   ctx.textAlign    = 'left';
@@ -756,15 +930,15 @@ function renderMiniscene() {
   ctx.textBaseline = 'middle';
 
   ctx.fillStyle = '#ffccff';
-  ctx.font      = 'bold 40px Arial';
+  ctx.font      = 'bold 40px "BelweC AG"';
   ctx.fillText('Кто эта прекрасная девушка?', CANVAS_W / 2, CANVAS_H / 2 - 44);
 
   ctx.fillStyle = '#dddddd';
-  ctx.font      = '24px Arial';
+  ctx.font      = '24px "BelweC AG"';
   ctx.fillText('Она исчезла так быстро...', CANVAS_W / 2, CANVAS_H / 2 + 4);
 
   ctx.fillStyle = '#999999';
-  ctx.font      = 'italic 18px Arial';
+  ctx.font      = 'italic 18px "BelweC AG"';
   ctx.fillText('Лети дальше. Может встретишь снова.', CANVAS_W / 2, CANVAS_H / 2 + 38);
 
   // Progress bar
@@ -791,7 +965,7 @@ function renderCountdown() {
   ctx.textAlign    = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = '#ffffff';
-  ctx.font      = 'bold 50px Arial';
+  ctx.font      = 'bold 50px "BelweC AG"';
   ctx.fillText('Приготовься', CANVAS_W / 2, CANVAS_H / 2 - 16);
 
   // Track (background)
@@ -810,23 +984,26 @@ function renderDead() {
   ctx.fillStyle = 'rgba(0,0,0,0.68)';
   ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
 
+  // Bird (die.png, spinning) visible on top of the overlay
+  renderBirdSprite();
+
   ctx.textAlign    = 'center';
   ctx.textBaseline = 'middle';
 
   ctx.fillStyle = '#ff4444';
-  ctx.font      = 'bold 58px Arial';
+  ctx.font      = 'bold 58px "BelweC AG"';
   ctx.fillText('Это РПУ', CANVAS_W / 2, CANVAS_H / 2 - 70);
 
   ctx.fillStyle = '#ffffff';
-  ctx.font      = '32px Arial';
+  ctx.font      = '32px "BelweC AG"';
   ctx.fillText(`Пройдено труб: ${score}`, CANVAS_W / 2, CANVAS_H / 2 - 10);
 
   ctx.fillStyle = '#FFD700';
-  ctx.font      = 'bold 24px Arial';
+  ctx.font      = 'bold 24px "BelweC AG"';
   ctx.fillText(`Рекорд: ${bestScore}`, CANVAS_W / 2, CANVAS_H / 2 + 34);
 
   ctx.fillStyle = '#cccccc';
-  ctx.font      = '22px Arial';
+  ctx.font      = '22px "BelweC AG"';
   ctx.fillText('Space / Клик — попробовать снова', CANVAS_W / 2, CANVAS_H / 2 + 85);
 
   ctx.textAlign    = 'left';
@@ -842,20 +1019,153 @@ function renderWin() {
   ctx.textBaseline = 'middle';
 
   ctx.fillStyle = '#FFD700';
-  ctx.font      = 'bold 66px Arial';
+  ctx.font      = 'bold 66px "BelweC AG"';
   ctx.fillText('ТЫ ПРОШЁЛ!', CANVAS_W / 2, CANVAS_H / 2 - 80);
 
   ctx.fillStyle = '#ffccff';
-  ctx.font      = '28px Arial';
+  ctx.font      = '28px "BelweC AG"';
   ctx.fillText('50 труб позади. Она ждёт тебя...', CANVAS_W / 2, CANVAS_H / 2 - 20);
 
   ctx.fillStyle = '#ffffff';
-  ctx.font      = '22px Arial';
+  ctx.font      = '22px "BelweC AG"';
   ctx.fillText(`Рекорд: ${bestScore}`, CANVAS_W / 2, CANVAS_H / 2 + 24);
 
   ctx.fillStyle = '#aaaaaa';
-  ctx.font      = '20px Arial';
+  ctx.font      = '20px "BelweC AG"';
   ctx.fillText('Space / Клик — сыграть снова', CANVAS_W / 2, CANVAS_H / 2 + 72);
+
+  ctx.textAlign    = 'left';
+  ctx.textBaseline = 'alphabetic';
+}
+
+// ── Story screen ──────────────────────────────────────────────────────────────
+
+function renderStory() {
+  const now = Date.now();
+
+  // ── Deep-space background ─────────────────────────────────────────────────
+  ctx.fillStyle = '#030612';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // Twinkling stars
+  const t = now * 0.001;
+  for (const star of storyStars) {
+    const alpha = 0.3 + 0.7 * (0.5 + 0.5 * Math.sin(t * 1.3 + star.phase));
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle   = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(star.x, star.y, star.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // Nebula colour washes
+  const g1 = ctx.createRadialGradient(350, 180, 0, 350, 180, 380);
+  g1.addColorStop(0, 'rgba(90,20,150,0.22)');
+  g1.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g1;
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  const g2 = ctx.createRadialGradient(980, 320, 0, 980, 320, 300);
+  g2.addColorStop(0, 'rgba(20,60,140,0.18)');
+  g2.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g2;
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // ── Text panel ────────────────────────────────────────────────────────────
+  const panelW = 880;
+  const panelH = 230;
+  const panelX = (CANVAS_W - panelW) / 2;
+  const panelY = CANVAS_H / 2 - panelH / 2 - 10;
+
+  ctx.fillStyle = 'rgba(4,8,32,0.75)';
+  ctx.beginPath();
+  ctx.roundRect(panelX, panelY, panelW, panelH, 14);
+  ctx.fill();
+
+  ctx.strokeStyle = 'rgba(130,80,220,0.5)';
+  ctx.lineWidth   = 1.5;
+  ctx.beginPath();
+  ctx.roundRect(panelX, panelY, panelW, panelH, 14);
+  ctx.stroke();
+
+  // ── "История" header ──────────────────────────────────────────────────────
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font         = 'bold 20px "BelweC AG"';
+  ctx.fillStyle    = 'rgba(180,140,255,0.9)';
+  ctx.shadowColor  = 'rgba(150,100,255,0.8)';
+  ctx.shadowBlur   = 10;
+  ctx.fillText('История', CANVAS_W / 2, panelY + 24);
+  ctx.shadowBlur   = 0;
+  ctx.shadowColor  = 'transparent';
+
+  // Thin separator
+  ctx.strokeStyle = 'rgba(130,80,220,0.4)';
+  ctx.lineWidth   = 1;
+  ctx.beginPath();
+  ctx.moveTo(panelX + 60, panelY + 42);
+  ctx.lineTo(panelX + panelW - 60, panelY + 42);
+  ctx.stroke();
+
+  // ── Typewriter text ───────────────────────────────────────────────────────
+  const storyFont = '21px "BelweC AG"';
+  const maxTextW  = panelW - 80;
+
+  // Pre-compute word-wrapped lines once
+  if (!storyLines) {
+    ctx.font = storyFont;
+    const words    = STORY_TEXT.split(' ');
+    const computed = [];
+    let line = '';
+    for (const w of words) {
+      const test = line ? line + ' ' + w : w;
+      if (ctx.measureText(test).width > maxTextW && line) {
+        computed.push(line);
+        line = w;
+      } else {
+        line = test;
+      }
+    }
+    if (line) computed.push(line);
+    storyLines    = computed;
+    storyFullText = storyLines.join('\n'); // '\n' marks line breaks for char counting
+  }
+
+  // Advance typewriter counter
+  const elapsed = now - storyStart;
+  storyChars = Math.min(Math.floor(elapsed / 1000 * STORY_CHARS_PER_SEC), storyFullText.length);
+  if (storyChars >= storyFullText.length && !storyTypingDone) {
+    storyTypingDone = true;
+    skipBtn.style.display = 'block';
+  }
+
+  // Render revealed text line by line
+  ctx.font         = storyFont;
+  ctx.textAlign    = 'left';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle    = '#ddd8f0';
+
+  const lineH  = 35;
+  const textX  = panelX + 40;
+  const textY  = panelY + 56;
+
+  const visible      = storyFullText.slice(0, storyChars);
+  const visibleLines = visible.split('\n');
+  for (let i = 0; i < visibleLines.length; i++) {
+    ctx.fillText(visibleLines[i], textX, textY + i * lineH);
+  }
+
+  // Blinking cursor (while typing is in progress)
+  if (!storyTypingDone && Math.floor(now / 500) % 2 === 0) {
+    const lastLine = visibleLines[visibleLines.length - 1];
+    const li       = visibleLines.length - 1;
+    ctx.font       = storyFont;
+    const cursorX  = textX + ctx.measureText(lastLine).width + 3;
+    const cursorY  = textY + li * lineH + 3;
+    ctx.fillStyle  = 'rgba(200,180,255,0.9)';
+    ctx.fillRect(cursorX, cursorY, 2, 21);
+  }
 
   ctx.textAlign    = 'left';
   ctx.textBaseline = 'alphabetic';
