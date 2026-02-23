@@ -57,7 +57,7 @@ const THEME = {
 
 // ─── Game state machine ───────────────────────────────────────────────────────
 
-const S = { START: 0, PLAYING: 1, MINISCENE: 2, DEAD: 3, WIN: 4, INTRO: 5, WIN_VIDEO: 6, COUNTDOWN: 7, MINISCENE_TEXT: 8, STORY: 9 };
+const S = { START: 0, PLAYING: 1, MINISCENE: 2, DEAD: 3, WIN: 4, INTRO: 5, WIN_VIDEO: 6, COUNTDOWN: 7, MINISCENE_TEXT: 8, STORY: 9, ENDING: 10 };
 
 // ─── Game variables ───────────────────────────────────────────────────────────
 
@@ -72,7 +72,9 @@ let totalSpawned;
 let miniscenePlayed;
 let minisceneStart;
 let countdownStart;
+let endingStart;
 let nearMissFlash;
+let cheatMode = false;
 let lastTime;
 
 let storyLines      = null;
@@ -208,6 +210,7 @@ function resetSession() {
   score           = 0;
   totalSpawned    = 0;
   nearMissFlash   = 0;
+  cheatMode       = false;
   miniscenePlayed = false;
   lastTime        = null;
   state           = S.START;
@@ -326,10 +329,11 @@ function playMusic(epoch) {
   };
 }
 
-function playVideo(src) {
+function playVideo(src, vol = 1) {
   stopMusic();
-  videoEl.src   = src;
-  videoEl.muted = isMuted;
+  videoEl.src    = src;
+  videoEl.volume = vol;
+  videoEl.muted  = isMuted;
   videoEl.style.display = 'block';
   skipBtn.style.display  = 'block';
   videoEl.play().catch(() => {});
@@ -359,7 +363,8 @@ function onVideoEnd() {
     state = S.MINISCENE_TEXT;
     playMusic(2);
   } else if (state === S.WIN_VIDEO) {
-    state = S.WIN;
+    endingStart = Date.now();
+    state = S.ENDING;
   }
 }
 
@@ -376,6 +381,7 @@ function getCanvasCoords(e) {
 function setupInput() {
   document.addEventListener('keydown', e => {
     if (e.code === 'Space') { e.preventDefault(); ensureAudio(); onInput(); }
+    if (e.key === 'F9') { e.preventDefault(); if (state === S.PLAYING) cheatMode = !cheatMode; }
   });
 
   canvas.addEventListener('pointerdown', e => {
@@ -424,6 +430,9 @@ function onInput() {
     case S.DEAD:
       resetSession();
       break;
+    case S.ENDING:
+      state = S.WIN;
+      break;
     case S.WIN:
       playIntroNext = true;
       resetSession();
@@ -449,6 +458,7 @@ function gameLoop(ts) {
 function update(dt) {
   if (state === S.INTRO || state === S.WIN_VIDEO) return;
   if (state === S.STORY) return;
+  if (state === S.ENDING) return;
   if (state === S.MINISCENE) return; // wait for video to end
   if (state === S.MINISCENE_TEXT) {
     if (Date.now() - minisceneStart >= MINISCENE_MS) state = S.PLAYING;
@@ -489,8 +499,16 @@ function update(dt) {
   }
 
   // Bird physics
-  bird.vy          += GRAVITY * dt;
-  bird.y           += bird.vy  * dt;
+  if (cheatMode) {
+    const nextPipe = pipes.find(p => !p.passed && p.x + PIPE_WIDTH > bird.x);
+    const targetCy = nextPipe ? nextPipe.gapY + nextPipe.gapSize / 2 : CANVAS_H / 2;
+    const currentCy = bird.y + BIRD_SIZE / 2;
+    bird.vy = Math.max(-9, Math.min(9, (targetCy - currentCy) * 0.28));
+    bird.y += bird.vy * dt;
+  } else {
+    bird.vy += GRAVITY * dt;
+    bird.y  += bird.vy * dt;
+  }
   bird.jumpStretch  = Math.max(0, bird.jumpStretch - 0.07 * dt);
   nearMissFlash     = Math.max(0, nearMissFlash - 0.04 * dt);
 
@@ -529,7 +547,7 @@ function update(dt) {
         stopMusic();
         if (sofikoVideo) sofikoVideo.pause();
         playWin();
-        playVideo('video/3.mp4');
+        playVideo('video/3.mp4', 0.5);
       }
     }
   }
@@ -587,6 +605,7 @@ function render() {
   switch (state) {
     case S.START:    renderStart(theme); break;
     case S.STORY:    renderStory();      break;
+    case S.ENDING:   renderEnding();     break;
     case S.WIN:      renderWin();        break;
     case S.INTRO:
     case S.WIN_VIDEO:
@@ -672,17 +691,17 @@ function renderGame(theme) {
     const girl    = girlImgs[p.imgIdx] ?? null;
 
     if (p.imgIdx === 49 && sofikoVideo && sofikoVideo.readyState >= 2) {
-      // Pipe 50 — animated Sofiko video character (screen blend removes black bg)
+      // Pipe 50 — animated Sofiko video (ctx.restore() always called so blend/transform don't leak)
       ctx.save();
       ctx.globalCompositeOperation = 'screen';
-      ctx.drawImage(sofikoVideo, p.x, bottomY, PIPE_WIDTH, botH);
+      try { ctx.drawImage(sofikoVideo, p.x, bottomY, PIPE_WIDTH, botH); } catch (_) {}
       ctx.restore();
 
       ctx.save();
       ctx.globalCompositeOperation = 'screen';
       ctx.translate(p.x, p.gapY);
       ctx.scale(1, -1);
-      ctx.drawImage(sofikoVideo, 0, 0, PIPE_WIDTH, topH);
+      try { ctx.drawImage(sofikoVideo, 0, 0, PIPE_WIDTH, topH); } catch (_) {}
       ctx.restore();
 
     } else if (girl) {
@@ -738,6 +757,15 @@ function renderGame(theme) {
   if (bestScore > 0) {
     ctx.font = '16px "BelweC AG"';
     ctx.fillText(`Рекорд: ${bestScore}`, 64, 46);
+  }
+
+  // Cheat mode indicator
+  if (cheatMode) {
+    ctx.fillStyle = 'rgba(255,220,0,0.18)';
+    ctx.fillRect(56, 76, 94, 26);
+    ctx.fillStyle = '#FFD700';
+    ctx.font      = 'bold 16px "BelweC AG"';
+    ctx.fillText('⚡ АВТО', 64, 94);
   }
 
   // Epoch badge
@@ -1167,6 +1195,119 @@ function renderStory() {
     ctx.fillRect(cursorX, cursorY, 2, 21);
   }
 
+  ctx.textAlign    = 'left';
+  ctx.textBaseline = 'alphabetic';
+}
+
+// ── Ending screen ─────────────────────────────────────────────────────────────
+
+const ENDING_TEXT = 'После всех испытаний, промахов и падений он наконец поймал не только удачу, но и любовь. Больше никаких гонок за успехом — лишь прогулки под звёздами, смех и простые моменты настоящего счастья. И впереди их ждал рассвет — начало новой истории. Полной любви заботы и прiвiтов софiйко це я зайчik Джудi Хопс из Зоотрополiса)';
+
+function renderEnding() {
+  const now     = Date.now();
+  const elapsed = now - endingStart;
+
+  // ── Warm night-sky background ─────────────────────────────────────────────
+  ctx.fillStyle = '#080312';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // Warm twinkling stars (reuse storyStars; generate if needed)
+  if (storyStars.length === 0) initStoryStars();
+  const t = now * 0.0008;
+  for (const star of storyStars) {
+    const alpha = 0.25 + 0.75 * (0.5 + 0.5 * Math.sin(t * 1.1 + star.phase));
+    ctx.globalAlpha = alpha * 0.85;
+    ctx.fillStyle   = star.r > 1.2 ? '#ffe8d0' : '#ffffff'; // warm tint for bigger stars
+    ctx.beginPath();
+    ctx.arc(star.x, star.y, star.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // Rose-pink nebula wash (centre)
+  const g1 = ctx.createRadialGradient(CANVAS_W * 0.5, CANVAS_H * 0.4, 0, CANVAS_W * 0.5, CANVAS_H * 0.4, 480);
+  g1.addColorStop(0, 'rgba(190,60,110,0.15)');
+  g1.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g1;
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // Warm golden glow at the bottom (dawn)
+  const g2 = ctx.createLinearGradient(0, CANVAS_H * 0.55, 0, CANVAS_H);
+  g2.addColorStop(0, 'rgba(0,0,0,0)');
+  g2.addColorStop(1, 'rgba(140,60,40,0.28)');
+  ctx.fillStyle = g2;
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // ── Text panel (fades in over 1.5 s) ─────────────────────────────────────
+  const fadeAlpha = Math.min(elapsed / 1500, 1);
+  ctx.globalAlpha = fadeAlpha;
+
+  const panelW = 880;
+  const panelH = 270;
+  const panelX = (CANVAS_W - panelW) / 2;
+  const panelY = CANVAS_H / 2 - panelH / 2 - 8;
+
+  ctx.fillStyle = 'rgba(6,3,18,0.72)';
+  ctx.beginPath();
+  ctx.roundRect(panelX, panelY, panelW, panelH, 14);
+  ctx.fill();
+
+  ctx.strokeStyle = 'rgba(210,130,160,0.45)';
+  ctx.lineWidth   = 1.5;
+  ctx.beginPath();
+  ctx.roundRect(panelX, panelY, panelW, panelH, 14);
+  ctx.stroke();
+
+  // Decorative top ornament: ── ♡ ──
+  const mx = CANVAS_W / 2;
+  ctx.strokeStyle = 'rgba(200,120,150,0.5)';
+  ctx.lineWidth   = 1;
+  ctx.beginPath(); ctx.moveTo(mx - 80, panelY + 26); ctx.lineTo(mx - 14, panelY + 26); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(mx + 14, panelY + 26); ctx.lineTo(mx + 80, panelY + 26); ctx.stroke();
+  ctx.fillStyle = 'rgba(230,150,170,0.85)';
+  ctx.font      = '16px serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('♡', mx, panelY + 26);
+
+  // ── Word-wrapped text ─────────────────────────────────────────────────────
+  const endingFont = '21px "BelweC AG"';
+  const maxTextW   = panelW - 80;
+  ctx.font         = endingFont;
+
+  const words    = ENDING_TEXT.split(' ');
+  const lines    = [];
+  let   line     = '';
+  for (const w of words) {
+    const test = line ? line + ' ' + w : w;
+    if (ctx.measureText(test).width > maxTextW && line) { lines.push(line); line = w; }
+    else line = test;
+  }
+  if (line) lines.push(line);
+
+  const lineH  = 35;
+  const totalH = lines.length * lineH;
+  const textY  = panelY + (panelH - totalH) / 2 + 8;
+
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle    = '#f0e8f8';
+  for (let i = 0; i < lines.length; i++) {
+    ctx.fillText(lines[i], CANVAS_W / 2, textY + i * lineH);
+  }
+
+  // ── "Continue" hint (appears after 2 s, pulses) ───────────────────────────
+  if (elapsed > 2000) {
+    const pulse = 0.55 + 0.45 * Math.sin(now * 0.0028);
+    ctx.globalAlpha = fadeAlpha * pulse;
+    ctx.fillStyle   = 'rgba(220,190,210,0.75)';
+    ctx.font        = '18px "BelweC AG"';
+    ctx.textAlign   = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Space / Клик — продолжить', CANVAS_W / 2, panelY + panelH - 18);
+  }
+
+  ctx.globalAlpha  = 1;
   ctx.textAlign    = 'left';
   ctx.textBaseline = 'alphabetic';
 }
